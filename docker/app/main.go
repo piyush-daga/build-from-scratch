@@ -22,7 +22,7 @@ const DockerRegistryBaseURL = "https://registry.hub.docker.com"
 
 // TODO Improvements:
 //   - Watch the video on docker and implement other functionalities as well
-//   - such as cgroups
+//   - such as cgroups, noice
 //
 // Usage: your_docker.sh run <image> <command> <arg1> <arg2> ...
 func main() {
@@ -38,11 +38,6 @@ func main() {
 	defer os.RemoveAll(tempDir)
 	checkErr(err)
 
-	// List the temp dir (root) to see all the files in it
-	// printFilesAndDir("/")
-	// printFilesAndDir("/bin")
-	// catFile("/etc/resolv.conf")
-
 	cmd := exec.Command(command, args...)
 
 	// Wire up stdout and stderr from child process
@@ -54,7 +49,7 @@ func main() {
 
 	// Isolate the pid namespace, so that the processes running inside the containerised temp folder
 	// cannot access the local/parent machine's process and make any destructive changes
-	// CloneFlags is not available on Mac -- need to set: a couple of directives at the top of the file
+	// CloneFlags is not available on Mac -- need to set: linux directive at the top of the file
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: syscall.CLONE_NEWPID,
 	}
@@ -104,7 +99,6 @@ type DockerRegistryManifestResp struct {
 }
 
 func httpRequest(url string, headers map[string]string) (*http.Response, error) {
-	// fmt.Println("Url to make the request is: ", url)
 	client := &http.Client{}
 	req, _ := http.NewRequest("GET", url, nil)
 
@@ -132,19 +126,17 @@ func (d *DockerRegistry) fetchManifest() (DockerRegistryManifestResp, error) {
 	url := fmt.Sprintf("%s/v2/library/%s/manifests/latest", DockerRegistryBaseURL, d.Image)
 	headers := map[string]string{
 		"Authorization": fmt.Sprintf("Bearer %s", d.Token),
-		"Accept":        "application/vnd.docker.distribution.manifest.v2+json",
+		// To get v2 version of the response, which has the media type for each layer
+		"Accept": "application/vnd.docker.distribution.manifest.v2+json",
 	}
 
 	resp, err := httpRequest(url, headers)
 	if err != nil {
-		fmt.Println("Inside fetchManifest resp err check")
-
 		return DockerRegistryManifestResp{}, err
 	}
 
 	var manifest DockerRegistryManifestResp
 	if err = json.NewDecoder(resp.Body).Decode(&manifest); err != nil {
-		fmt.Println("Inside fetchManifest json decode check")
 		return DockerRegistryManifestResp{}, err
 	}
 
@@ -165,8 +157,6 @@ func (d *DockerRegistry) fetchToken() error {
 	}
 	d.Token = tokenResp.Token
 
-	// fmt.Println("Token inside docker struct is: ", tokenResp.Token)
-
 	return nil
 }
 
@@ -186,48 +176,12 @@ func (d *DockerRegistry) downloadAndExtractLayers(layers []DockerImageLayers) er
 		err = os.WriteFile("/image.tar.gz", data, 0755)
 		checkErr(err)
 
-		// Crude printing of the tar data
-		// fmt.Println("Tar data is: ", string(data))
-
-		// Since we are not setting the accept encoding header, http.Transport will automatically
-		// set the header and transparently uncompress the gzip for us. Ref: https://go.dev/src/net/http/transport.go#L181
-		// Use the shell's tar capability to extract, as Go does not have an easy and native
-		// implementation
-
-		// fmt.Println("Files before ungzip are: ")
-		// printFilesAndDir("/")
-		// fmt.Println("Files in /etc are: ")
-		// printFilesAndDir("/etc")
-
-		// Create a /dev/null file as it is needed by cmd.Run() command
-		os.WriteFile("/dev/null", []byte{}, 0755)
-
 		// UnGzip
 		err = UnGzip("/image.tar.gz", "/image.tar")
 		checkErr(err)
 
-		// fmt.Println("Files after ungzip are: ")
-		// printFilesAndDir("/")
-
-		// Passing the root where we want to save the file
-		// cmd := exec.Command("/bin/tar", "-xzf", "/image.tar.gz")
-		// err = cmd.Run()
-		// checkErr(err)
-
 		err = Untar("image.tar", "image")
 		checkErr(err)
-		// Let's see if tarring was done correctly
-		// fmt.Println("Files after untarring are: ")
-		// printFilesAndDir("/")
-		// fmt.Println("Files after untarring in image are: ")
-		// printFilesAndDir("/image")
-
-		// Copy back to root
-		// err = cp.Copy("/image/", "/")
-		// checkErr(err)
-
-		// fmt.Println("Files after copying are: ")
-		// printFilesAndDir("/")
 
 		// A terrible idea/solution
 		err = syscall.Chroot("image")
@@ -262,7 +216,6 @@ func UnGzip(source, target string) error {
 }
 
 func Untar(tarball, target string) error {
-	// tarReader := tar.NewReader(r)
 	reader, err := os.Open(tarball)
 	if err != nil {
 		return err
@@ -333,21 +286,11 @@ func createIsolation(executable string) (string, error) {
 		return "", err
 	}
 
-	// Print the files and folders
-	// fmt.Println("Files unser bin are: ")
-	// printFilesAndDir("/bin")
-	// fmt.Println("Files under /usr are: ")
-	// printFilesAndDir("/usr")
-	// fmt.Println("Files under /usr/bin are: ")
-	// printFilesAndDir("/usr/bin")
-
 	// Create the required directories in the temp dir
-	// os.MkdirAll(tempDir+"/bin", os.ModeAppend)
 	os.MkdirAll(tempDir+filepath.Dir(executable), os.ModeAppend)
 	// Might need /etc/resolve.conf to make DNS requests from inside the container, but is this the right thing to do?
 	os.MkdirAll(tempDir+"/etc", os.ModeAppend)
 	os.MkdirAll(tempDir+"/dev", os.ModeAppend)
-	// os.MkdirAll(tempDir+"/usr/bin", os.ModeAppend)
 
 	// Let's copy the executable first
 	copy(executable, tempDir+executable)
@@ -357,11 +300,6 @@ func createIsolation(executable string) (string, error) {
 	}
 
 	cp.Copy("/etc", tempDir+"/etc")
-	// cp.Copy("/bin", tempDir+"/bin")
-	// copy("/bin/tar", tempDir+"/bin/tar")
-	// if err = os.Chmod(tempDir+"/bin/tar", 0755); err != nil {
-	// 	return tempDir, err
-	// }
 
 	// Move to the temp dir
 	syscall.Chdir(tempDir)
