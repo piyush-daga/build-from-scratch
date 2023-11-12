@@ -1,5 +1,3 @@
-//go:build linux
-
 package main
 
 import (
@@ -13,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"syscall"
 
 	cp "github.com/otiai10/copy"
@@ -26,19 +25,15 @@ const DockerRegistryBaseURL = "https://registry.hub.docker.com"
 //
 // Usage: your_docker.sh run <image> <command> <arg1> <arg2> ...
 func main() {
-	image := os.Args[2]
+	// image := os.Args[2]
 	command := os.Args[3]
 	args := os.Args[4:]
 
 	tempDir, err := createIsolation(command)
-	// This might be incorrect, as we have chroot(ed) into that directory
-	// Also, this is not required right now, as we're running on a container, and not exactly on local,
-	// but iw would be handy in case we were doing local dev.
-	// ! This command should not be run here, but rather after chrooting back to the main local fs.
-	defer os.RemoveAll(tempDir)
 	checkErr(err)
 
 	cmd := exec.Command(command, args...)
+	defer cleanup(cmd, tempDir)
 
 	// Wire up stdout and stderr from child process
 	cmd.Stderr = os.Stderr
@@ -50,24 +45,41 @@ func main() {
 	// Isolate the pid namespace, so that the processes running inside the containerised temp folder
 	// cannot access the local/parent machine's process and make any destructive changes
 	// CloneFlags is not available on Mac -- need to set: linux directive at the top of the file
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags: syscall.CLONE_NEWPID,
+	if runtime.GOOS == "linux" {
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Cloneflags: syscall.CLONE_NEWPID,
+		}
 	}
 
 	// Fetch the image from docker registry to run the commands on
-	d := &DockerRegistry{
-		Image: image,
-	}
-	d.fetchImage()
+	// d := &DockerRegistry{
+	// 	Image: image,
+	// }
+	// d.fetchImage()
+
+	fmt.Println("Executing the command")
 
 	// Wire up exit codes from child process
 	err = cmd.Run()
 	if err != nil {
 		fmt.Println("Error encountered in main function is: ", err.Error())
-		if fmt.Sprintf("%T", err) == "*exec.ExitError" {
-			os.Exit(err.(*exec.ExitError).ExitCode())
-		}
 	}
+}
+
+// Remove the chrooted temp directory
+// Pass on the exit code the main process
+func cleanup(cmd *exec.Cmd, tempDir string) {
+	fmt.Println("Performing cleanup before shutdown")
+	// This is a bad bad hack, but I can't think of any other way.
+	// To cleanup the created temp directory, we `chroot` into it,
+	// but do not `chdir` into it. The benefit is that: / -> points to the new root
+	// but . -> still points to the current pwd (before chroot). That way we can traverse the
+	// fs to reach the original host /tmp dir and perform cleanup
+	err := os.RemoveAll("../" + tempDir)
+	if err != nil {
+		fmt.Println("Err inside defer is: ", err.Error())
+	}
+	os.Exit(cmd.ProcessState.ExitCode())
 }
 
 type DockerRegistry struct {
@@ -183,7 +195,7 @@ func (d *DockerRegistry) downloadAndExtractLayers(layers []DockerImageLayers) er
 		err = Untar("image.tar", "image")
 		checkErr(err)
 
-		// A terrible idea/solution
+		// A terrible idea/solution -- we must not do this !!
 		err = syscall.Chroot("image")
 		checkErr(err)
 	}
@@ -259,6 +271,7 @@ func (d *DockerRegistry) fetchImage() error {
 	if err != nil {
 		return err
 	}
+	fmt.Println()
 
 	// Fetch the image manifest
 	manifest, err := d.fetchManifest()
@@ -278,7 +291,6 @@ func (d *DockerRegistry) fetchImage() error {
 // We want to ensure isolation from the local filesystem so that the command does not perform anything untoward or risky.
 // So, we can create a temporary directory, make it root, copy the executable and run the same
 func createIsolation(executable string) (string, error) {
-	const resolvConfPath = "/etc/resolv.conf"
 	// Create a temp directory
 	tempDir, err := os.MkdirTemp("", "docker-codecrafters")
 
@@ -302,7 +314,7 @@ func createIsolation(executable string) (string, error) {
 	cp.Copy("/etc", tempDir+"/etc")
 
 	// Move to the temp dir
-	syscall.Chdir(tempDir)
+	// syscall.Chdir(tempDir)
 	if err != nil {
 		return tempDir, err
 	}
